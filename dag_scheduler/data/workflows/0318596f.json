@@ -1,0 +1,38 @@
+{
+  "id": "0318596f",
+  "name": "测试工作流",
+  "tasks": [
+    {
+      "id": "task1",
+      "name": "任务1",
+      "command": "echo Hello",
+      "dependencies": [],
+      "timeout": 300,
+      "max_retries": 3,
+      "retry_delay": 5,
+      "position": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": "task2",
+      "name": "任务2",
+      "command": "echo World",
+      "dependencies": [
+        "task1"
+      ],
+      "timeout": 300,
+      "max_retries": 3,
+      "retry_delay": 5,
+      "position": {
+        "x": 0,
+        "y": 0
+      }
+    }
+  ],
+  "schedule": null,
+  "max_concurrency": 5,
+  "created_at": "2026-09-14T21:19:56.889797",
+  "updated_at": "2026-09-14T21:19:56.889787"
+}

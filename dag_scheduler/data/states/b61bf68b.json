@@ -1,0 +1,35 @@
+{
+  "run_id": "b61bf68b",
+  "workflow_id": "0318596f",
+  "status": "success",
+  "start_time": "2026-09-14T21:21:06.803468",
+  "end_time": "2026-09-14T21:21:06.820253",
+  "task_instances": {
+    "task1": {
+      "task_id": "task1",
+      "workflow_id": "0318596f",
+      "status": "success",
+      "start_time": "2026-09-14T21:21:06.806092",
+      "end_time": "2026-09-14T21:21:06.812966",
+      "retry_count": 0,
+      "error_message": null,
+      "logs": [
+        "Hello"
+      ],
+      "process_id": 466390
+    },
+    "task2": {
+      "task_id": "task2",
+      "workflow_id": "0318596f",
+      "status": "success",
+      "start_time": "2026-09-14T21:21:06.813756",
+      "end_time": "2026-09-14T21:21:06.819357",
+      "retry_count": 0,
+      "error_message": null,
+      "logs": [
+        "World"
+      ],
+      "process_id": 466391
+    }
+  }
+}

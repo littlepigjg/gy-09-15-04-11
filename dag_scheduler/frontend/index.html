@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DAG工作流调度引擎</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- 顶部导航 -->
+        <header class="header">
+            <div class="header-left">
+                <h1>DAG工作流调度引擎</h1>
+            </div>
+            <div class="header-right">
+                <div class="connection-status" id="wsStatus">
+                    <span class="status-dot disconnected"></span>
+                    <span>未连接</span>
+                </div>
+                <button class="btn btn-primary" id="btnNewWorkflow">新建工作流</button>
+            </div>
+        </header>
+
+        <div class="main-content">
+            <!-- 左侧面板 -->
+            <aside class="sidebar">
+                <!-- 工作流列表 -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h3>工作流列表</h3>
+                        <button class="btn-icon" id="btnRefreshWorkflows" title="刷新">⟳</button>
+                    </div>
+                    <div class="panel-body" id="workflowList">
+                        <div class="empty-state">暂无工作流</div>
+                    </div>
+                </div>
+
+                <!-- 任务工具箱 -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h3>任务工具箱</h3>
+                    </div>
+                    <div class="panel-body">
+                        <div class="toolbox">
+                            <div class="toolbox-item" draggable="true" data-type="shell">
+                                <div class="toolbox-icon">⚙</div>
+                                <span>Shell命令</span>
+                            </div>
+                            <div class="toolbox-item" draggable="true" data-type="python">
+                                <div class="toolbox-icon">🐍</div>
+                                <span>Python脚本</span>
+                            </div>
+                            <div class="toolbox-item" draggable="true" data-type="http">
+                                <div class="toolbox-icon">🌐</div>
+                                <span>HTTP请求</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 运行历史 -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h3>运行历史</h3>
+                        <button class="btn-icon" id="btnRefreshRuns" title="刷新">⟳</button>
+                    </div>
+                    <div class="panel-body" id="runHistory">
+                        <div class="empty-state">暂无运行记录</div>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- 中央编辑区 -->
+            <main class="editor-area">
+                <!-- 编辑器工具栏 -->
+                <div class="editor-toolbar" id="editorToolbar">
+                    <div class="toolbar-left">
+                        <button class="btn btn-success" id="btnRunWorkflow" disabled>
+                            ▶ 运行
+                        </button>
+                        <button class="btn btn-warning" id="btnStopWorkflow" disabled>
+                            ■ 停止
+                        </button>
+                        <span class="separator">|</span>
+                        <button class="btn" id="btnAutoLayout" title="自动布局">⊞ 布局</button>
+                        <button class="btn" id="btnZoomIn" title="放大">+</button>
+                        <button class="btn" id="btnZoomOut" title="缩小">-</button>
+                        <button class="btn" id="btnFitView" title="适应视图">⊡ 适应</button>
+                    </div>
+                    <div class="toolbar-center">
+                        <span id="workflowName" class="workflow-name">未选择工作流</span>
+                    </div>
+                    <div class="toolbar-right">
+                        <button class="btn" id="btnValidate" title="验证DAG">✓ 验证</button>
+                        <button class="btn btn-primary" id="btnSave" title="保存">💾 保存</button>
+                    </div>
+                </div>
+
+                <!-- SVG画布 -->
+                <div class="canvas-container" id="canvasContainer">
+                    <svg id="dagCanvas" class="dag-canvas">
+                        <defs>
+                            <marker id="arrowhead" markerWidth="10" markerHeight="7" 
+                                    refX="9" refY="3.5" orient="auto">
+                                <polygon points="0 0, 10 3.5, 0 7" fill="#666"/>
+                            </marker>
+                            <marker id="arrowhead-active" markerWidth="10" markerHeight="7" 
+                                    refX="9" refY="3.5" orient="auto">
+                                <polygon points="0 0, 10 3.5, 0 7" fill="#4CAF50"/>
+                            </marker>
+                        </defs>
+                        <g id="canvasGroup">
+                            <g id="connectionsLayer"></g>
+                            <g id="nodesLayer"></g>
+                        </g>
+                    </svg>
+                    
+                    <!-- 空状态提示 -->
+                    <div class="canvas-empty" id="canvasEmpty">
+                        <div class="empty-icon">📋</div>
+                        <div class="empty-text">拖拽任务到此处创建工作流</div>
+                        <div class="empty-hint">或点击"新建工作流"开始</div>
+                    </div>
+                </div>
+            </main>
+
+            <!-- 右侧面板 -->
+            <aside class="properties-panel" id="propertiesPanel">
+                <!-- 属性编辑 -->
+                <div class="panel" id="taskProperties" style="display: none;">
+                    <div class="panel-header">
+                        <h3>任务属性</h3>
+                        <button class="btn-icon" id="btnCloseProperties">✕</button>
+                    </div>
+                    <div class="panel-body">
+                        <form id="taskForm">
+                            <div class="form-group">
+                                <label>任务ID</label>
+                                <input type="text" id="taskId" readonly class="form-control">
+                            </div>
+                            <div class="form-group">
+                                <label>任务名称</label>
+                                <input type="text" id="taskName" class="form-control" required>
+                            </div>
+                            <div class="form-group">
+                                <label>执行命令</label>
+                                <textarea id="taskCommand" class="form-control" rows="3" required></textarea>
+                            </div>
+                            <div class="form-group">
+                                <label>超时时间（秒）</label>
+                                <input type="number" id="taskTimeout" class="form-control" value="300" min="1">
+                            </div>
+                            <div class="form-group">
+                                <label>最大重试次数</label>
+                                <input type="number" id="taskMaxRetries" class="form-control" value="3" min="0">
+                            </div>
+                            <div class="form-group">
+                                <label>重试延迟（秒）</label>
+                                <input type="number" id="taskRetryDelay" class="form-control" value="5" min="0">
+                            </div>
+                            <div class="form-group">
+                                <label>依赖任务</label>
+                                <div id="taskDependencies" class="dependencies-list"></div>
+                            </div>
+                            <div class="form-actions">
+                                <button type="submit" class="btn btn-primary">保存</button>
+                                <button type="button" class="btn btn-danger" id="btnDeleteTask">删除</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- 工作流属性 -->
+                <div class="panel" id="workflowProperties">
+                    <div class="panel-header">
+                        <h3>工作流属性</h3>
+                    </div>
+                    <div class="panel-body">
+                        <form id="workflowForm">
+                            <div class="form-group">
+                                <label>工作流名称</label>
+                                <input type="text" id="wfName" class="form-control" required>
+                            </div>
+                            <div class="form-group">
+                                <label>最大并发数</label>
+                                <input type="number" id="wfMaxConcurrency" class="form-control" value="5" min="1">
+                            </div>
+                            <div class="form-group">
+                                <label>定时调度（Cron）</label>
+                                <input type="text" id="wfSchedule" class="form-control" placeholder="例: 0 2 * * *">
+                            </div>
+                            <div class="form-group">
+                                <label>任务数量</label>
+                                <input type="text" id="wfTaskCount" class="form-control" readonly>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- 运行详情 -->
+                <div class="panel" id="runDetails" style="display: none;">
+                    <div class="panel-header">
+                        <h3>运行详情</h3>
+                        <button class="btn-icon" id="btnCloseRunDetails">✕</button>
+                    </div>
+                    <div class="panel-body">
+                        <div class="run-info">
+                            <div class="info-row">
+                                <span class="label">运行ID:</span>
+                                <span id="runId" class="value">-</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="label">状态:</span>
+                                <span id="runStatus" class="value status-badge">-</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="label">开始时间:</span>
+                                <span id="runStartTime" class="value">-</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="label">结束时间:</span>
+                                <span id="runEndTime" class="value">-</span>
+                            </div>
+                        </div>
+                        <div class="task-status-list" id="taskStatusList"></div>
+                    </div>
+                </div>
+            </aside>
+        </div>
+
+        <!-- 底部日志面板 -->
+        <footer class="log-panel" id="logPanel">
+            <div class="log-header">
+                <div class="log-tabs">
+                    <button class="log-tab active" data-tab="output">输出日志</button>
+                    <button class="log-tab" data-tab="system">系统日志</button>
+                </div>
+                <div class="log-actions">
+                    <button class="btn-icon" id="btnClearLog" title="清空">🗑</button>
+                    <button class="btn-icon" id="btnToggleLog" title="折叠">-</button>
+                </div>
+            </div>
+            <div class="log-content" id="logContent">
+                <div class="log-output" id="logOutput">
+                    <div class="log-line system">系统就绪，等待操作...</div>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <!-- 新建工作流对话框 -->
+    <div class="modal" id="newWorkflowModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>新建工作流</h3>
+                <button class="btn-icon modal-close" id="btnCloseNewModal">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>工作流名称</label>
+                    <input type="text" id="newWorkflowName" class="form-control" 
+                           placeholder="输入工作流名称" required>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" id="btnCancelNew">取消</button>
+                <button class="btn btn-primary" id="btnConfirmNew">创建</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 加载脚本 -->
+    <script src="dag_renderer.js"></script>
+    <script src="dag_editor.js"></script>
+    <script src="websocket_client.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+{
+  "run_id": "65836a48",
+  "workflow_id": "0318596f",
+  "status": "running",
+  "start_time": "2026-09-14T21:20:01.069245",
+  "end_time": null,
+  "task_instances": {
+    "task1": {
+      "task_id": "task1",
+      "workflow_id": "0318596f",
+      "status": "pending",
+      "start_time": null,
+      "end_time": null,
+      "retry_count": 0,
+      "error_message": null,
+      "logs": [],
+      "process_id": null
+    },
+    "task2": {
+      "task_id": "task2",
+      "workflow_id": "0318596f",
+      "status": "pending",
+      "start_time": null,
+      "end_time": null,
+      "retry_count": 0,
+      "error_message": null,
+      "logs": [],
+      "process_id": null
+    }
+  }
+}
