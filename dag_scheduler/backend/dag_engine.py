@@ -211,9 +211,38 @@ class DAGScheduler:
         # 检查条件任务配置
         for task in self.workflow.tasks:
             if task.type == TaskType.CONDITION:
-                if not task.condition:
-                    errors.append(f"条件任务 {task.id} 缺少条件配置")
-            
+                if not task.condition or not task.condition.expression.strip():
+                    errors.append(f"条件任务 {task.id} 缺少条件表达式")
+                    continue
+
+                true_task = task.condition.true_task
+                false_task = task.condition.false_task
+
+                # 至少配置一个分支
+                if not true_task and not false_task:
+                    errors.append(
+                        f"条件任务 {task.id} 至少需要配置一个分支（真分支或假分支）"
+                    )
+
+                # 分支目标必须存在
+                for branch, target in (("真分支", true_task), ("假分支", false_task)):
+                    if target and target not in self.task_map:
+                        errors.append(
+                            f"条件任务 {task.id} 的{branch}目标任务 {target} 不存在"
+                        )
+
+                # 分支目标必须是条件网关的直接后继（DAG依赖）
+                successors = self.adjacency[task.id]
+                for branch, target in (("真分支", true_task), ("假分支", false_task)):
+                    if target and target in self.task_map and target not in successors:
+                        errors.append(
+                            f"条件任务 {task.id} 的{branch}目标 {target} 必须依赖该条件任务"
+                        )
+
+                # 真、假分支不能指向同一个任务
+                if true_task and false_task and true_task == false_task:
+                    errors.append(f"条件任务 {task.id} 的真分支和假分支不能指向同一个任务")
+
             if task.type == TaskType.SUBWORKFLOW:
                 if not task.subworkflow_id:
                     errors.append(f"子工作流任务 {task.id} 缺少子工作流ID")
@@ -282,63 +311,159 @@ class DAGScheduler:
         
         return levels
     
-    def get_ready_tasks(
-        self, 
-        completed_tasks: Set[str], 
-        running_tasks: Set[str],
-        failed_tasks: Set[str],
-        skipped_tasks: Set[str],
-        context: Optional[Dict[str, Any]] = None
-    ) -> List[TaskDefinition]:
-        """获取当前可执行的任务"""
-        ready = []
-        
+    # 任务的终止态集合（终态后不会再被调度）
+    TERMINAL_STATUSES = {
+        TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.TIMEOUT,
+        TaskStatus.SKIPPED, TaskStatus.CANCELLED
+    }
+
+    def evaluate_condition(
+        self,
+        task: TaskDefinition,
+        variables: Dict[str, Any],
+        task_instances: Dict[str, Any]
+    ) -> Tuple[bool, str]:
+        """评估条件网关上的表达式
+
+        Returns:
+            (结果, 错误信息)。表达式本身非法时错误信息非空。
+        """
+        context = self.build_condition_context(variables, task_instances)
+
+        expression = task.condition.expression.strip()
+
+        # 1. 裸变量名，如 deploy_needed
+        if re.match(r'^\w+$', expression):
+            value = context.get(expression)
+            return bool(value), ""
+
+        # 2. ${var} 模板，如 ${env} == 'prod'
+        if '${' in expression:
+            processed = ExpressionEvaluator._substitute_variables(expression, context)
+            return bool(ExpressionEvaluator._evaluate_single(processed, context)), ""
+
+        # 3. 直接引用上下文字段的比较表达式，如 env == 'prod'
+        try:
+            return bool(ExpressionEvaluator._evaluate_single(expression, context)), ""
+        except Exception as e:
+            return False, str(e)
+
+    def build_condition_context(
+        self,
+        variables: Dict[str, Any],
+        task_instances: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """构建条件评估上下文：运行变量 + 每个任务的状态/输出"""
+        context = dict(variables or {})
+
+        for task_id, instance in (task_instances or {}).items():
+            # instance 可能是 TaskInstance 对象，也可能是 dict（运行上下文快照）
+            if isinstance(instance, dict):
+                status = instance.get('status')
+                outputs = instance.get('outputs', {}) or {}
+            else:
+                status = getattr(instance, 'status', None)
+                status = status.value if hasattr(status, 'value') else status
+                outputs = getattr(instance, 'outputs', {}) or {}
+
+            context[f'{task_id}_status'] = status
+            context[f'{task_id}_output'] = outputs
+            # 扁平输出也直接暴露，便于写 exit_code == 0 之类的表达式
+            if isinstance(outputs, dict):
+                for key, value in outputs.items():
+                    context.setdefault(key, value)
+
+        return context
+
+    def get_branch_targets(self, task: TaskDefinition) -> Tuple[Optional[str], Optional[str]]:
+        """获取条件网关的真/假分支目标（只返回确实为其后继的任务）"""
+        if not task.condition:
+            return None, None
+
+        successors = set(self.adjacency.get(task.id, []))
+        true_target = task.condition.true_task
+        false_target = task.condition.false_task
+
+        return (
+            true_target if true_target in successors else None,
+            false_target if false_target in successors else None
+        )
+
+    def get_runnable_tasks(
+        self,
+        completed: Set[str],
+        running: Set[str],
+        failed: Set[str],
+        skipped: Set[str],
+        variables: Optional[Dict[str, Any]] = None,
+        task_instances: Optional[Dict[str, Any]] = None
+    ) -> List[Tuple[TaskDefinition, str]]:
+        """获取当前可以执行的任务
+
+        级联跳过规则：任务的所有前驱都已到终态，且没有任何一个成功
+        （全部被跳过/失败/取消）时，该任务也应标记为跳过而不是执行。
+
+        Returns:
+            (任务, 原因) 列表。原因为空表示可以执行；
+            原因为 "skip:..." 表示该任务应跳过。
+        """
+        resolved = completed | failed | skipped
+        result: List[Tuple[TaskDefinition, str]] = []
+
         for task in self.workflow.tasks:
-            if task.id in completed_tasks or task.id in running_tasks:
-                continue
-            if task.id in failed_tasks or task.id in skipped_tasks:
-                continue
             if not task.enabled:
                 continue
-            
-            # 检查所有依赖是否已完成
-            all_deps_met = True
-            for dep_id in task.dependencies:
-                if dep_id not in completed_tasks and dep_id not in skipped_tasks:
-                    all_deps_met = False
-                    break
-            
-            if not all_deps_met:
+            if task.id in completed or task.id in running:
                 continue
-            
-            # 检查条件任务
-            if task.condition and context:
-                # 获取前驱任务的输出
-                condition_context = self._build_condition_context(task.id, context)
-                should_execute = task.condition.evaluate(condition_context)
-                
-                if not should_execute:
+            if task.id in failed or task.id in skipped:
+                continue
+
+            deps = task.dependencies
+
+            # 前驱尚未全部到终态：等待
+            if any(dep not in resolved for dep in deps):
+                continue
+
+            # 有前驱且全部终态时：必须有成功的前驱才继续执行
+            # （没有任何前驱的根任务不受此限制）
+            if deps:
+                succeeded_deps = [dep for dep in deps if dep in completed]
+                if not succeeded_deps:
+                    if any(dep in failed for dep in deps):
+                        reason = "上游任务失败"
+                    else:
+                        reason = "所在条件分支未被选中"
+                    result.append((task, f"skip:{reason}"))
                     continue
-            
-            ready.append(task)
-        
-        return ready
-    
-    def _build_condition_context(self, task_id: str, run_context: Dict[str, Any]) -> Dict[str, Any]:
-        """构建条件评估上下文"""
-        context = {}
-        
-        # 添加运行变量
-        context.update(run_context.get('variables', {}))
-        
-        # 添加前驱任务的状态和输出
-        for dep_id in self.reverse_adjacency[task_id]:
-            task_instance = run_context.get('task_instances', {}).get(dep_id)
-            if task_instance:
-                context[f'{dep_id}_status'] = task_instance.get('status', 'unknown')
-                context[f'{dep_id}_output'] = task_instance.get('outputs', {})
-        
-        return context
+
+            # 普通任务上的独立前置条件（不是条件网关）
+            if task.type != TaskType.CONDITION and task.condition:
+                condition_context = self.build_condition_context(
+                    variables or {}, task_instances or {}
+                )
+                if not ExpressionEvaluator.evaluate(
+                    task.condition.expression, condition_context
+                ):
+                    result.append((task, "skip:前置条件不满足"))
+                    continue
+
+            result.append((task, ""))
+
+        return result
+
+    def get_unresolved_tasks(
+        self,
+        completed: Set[str],
+        running: Set[str],
+        failed: Set[str],
+        skipped: Set[str]
+    ) -> List[TaskDefinition]:
+        """获取还停留在非终态的任务（用于执行结束后的兜底处理）"""
+        resolved = completed | running | failed | skipped
+        return [
+            task for task in self.workflow.tasks
+            if task.enabled and task.id not in resolved
+        ]
     
     def get_task_depth(self, task_id: str) -> int:
         """获取任务在DAG中的深度"""

@@ -337,6 +337,30 @@ html, body {
     stroke: var(--danger-color);
 }
 
+/* 条件分支未选中：已跳过，明确区别于失败（棕灰而非红色） */
+.node-body.skipped {
+    fill: rgba(141, 110, 99, 0.18);
+    stroke: #8d6e63;
+    stroke-dasharray: 6, 4;
+}
+
+.dag-node.skipped {
+    opacity: 0.75;
+}
+
+.node-skip-label {
+    fill: #bcaaa4;
+    font-size: 11px;
+    font-weight: 600;
+    text-anchor: middle;
+    pointer-events: none;
+}
+
+.node-body.cancelled {
+    fill: rgba(158, 158, 158, 0.15);
+    stroke: #9e9e9e;
+}
+
 .node-body.retry {
     fill: rgba(255, 152, 0, 0.2);
     stroke: var(--warning-color);
@@ -387,6 +411,57 @@ html, body {
 .connection-line.hover {
     stroke: var(--primary-color);
     stroke-width: 3;
+}
+
+/* 条件分支连线：真=绿，假=橙 */
+.connection-line.branch-true {
+    stroke: #4caf50;
+}
+
+.connection-line.branch-false {
+    stroke: #ff9800;
+}
+
+/* 运行时：实际走中的分支高亮流动，未走中的分支灰显虚线 */
+.connection-line.branch-taken {
+    stroke: var(--success-color);
+    stroke-width: 3;
+}
+
+.connection-line.branch-skipped {
+    stroke: #6d6d6d;
+    stroke-dasharray: 4, 4;
+    opacity: 0.55;
+    marker-end: none;
+}
+
+.branch-label-pill {
+    stroke-width: 1.5;
+}
+
+.branch-pill-true {
+    fill: rgba(76, 175, 80, 0.25);
+    stroke: #4caf50;
+}
+
+.branch-pill-false {
+    fill: rgba(255, 152, 0, 0.25);
+    stroke: #ff9800;
+}
+
+.branch-label-text {
+    font-size: 12px;
+    font-weight: 700;
+    text-anchor: middle;
+    pointer-events: none;
+}
+
+.branch-text-true {
+    fill: #4caf50;
+}
+
+.branch-text-false {
+    fill: #ff9800;
 }
 
 /* ==================== 属性面板 ==================== */
@@ -513,9 +588,112 @@ textarea.form-control {
     color: var(--danger-color);
 }
 
+.status-badge.skipped {
+    background: rgba(141, 110, 99, 0.25);
+    color: #bcaaa4;
+}
+
+.status-badge.cancelled {
+    background: rgba(158, 158, 158, 0.2);
+    color: #9e9e9e;
+}
+
+.status-badge.timeout {
+    background: rgba(255, 87, 34, 0.2);
+    color: #ff5722;
+}
+
+.status-badge.pending,
+.status-badge.waiting {
+    background: rgba(255, 152, 0, 0.15);
+    color: var(--warning-color);
+}
+
 .task-status-list {
-    max-height: 200px;
+    max-height: 300px;
     overflow-y: auto;
+}
+
+/* 运行详情统计行 */
+.run-counts {
+    justify-content: space-around;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.count-item {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.count-item b {
+    font-size: 14px;
+    margin-left: 4px;
+}
+
+.count-success b { color: var(--success-color); }
+.count-failed b { color: var(--danger-color); }
+.count-skipped b { color: #bcaaa4; }
+
+/* 条件配置 */
+.condition-config {
+    background: var(--bg-light);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 10px;
+    margin-bottom: 15px;
+}
+
+.form-hint {
+    display: block;
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 4px;
+    line-height: 1.4;
+}
+
+.form-hint code {
+    background: var(--bg-lighter);
+    padding: 1px 4px;
+    border-radius: 3px;
+}
+
+/* 运行详情任务行：跳过原因与分支结果 */
+.task-status-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.task-status-meta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    max-width: 45%;
+}
+
+.skip-reason {
+    font-size: 10px;
+    color: #bcaaa4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+}
+
+.branch-result {
+    font-size: 10px;
+    color: var(--warning-color);
+}
+
+.task-status-item.skipped {
+    opacity: 0.85;
+}
+
+.task-status-item.skipped .task-status-name {
+    text-decoration: line-through;
+    text-decoration-color: rgba(188, 170, 164, 0.6);
 }
 
 .task-status-item {
@@ -934,7 +1112,7 @@ textarea.form-control {
 .task-status-item.success { border-left-color: #4caf50; }
 .task-status-item.failed { border-left-color: #f44336; }
 .task-status-item.timeout { border-left-color: #ff5722; }
-.task-status-item.skipped { border-left-color: #9e9e9e; }
+.task-status-item.skipped { border-left-color: #8d6e63; }
 
 .task-status-item .task-name {
     flex: 1;

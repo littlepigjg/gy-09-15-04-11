@@ -55,6 +55,10 @@
                                 <div class="toolbox-icon">🌐</div>
                                 <span>HTTP请求</span>
                             </div>
+                            <div class="toolbox-item" draggable="true" data-type="condition">
+                                <div class="toolbox-icon">❓</div>
+                                <span>条件分支</span>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -143,9 +147,37 @@
                                 <label>任务名称</label>
                                 <input type="text" id="taskName" class="form-control" required>
                             </div>
-                            <div class="form-group">
+                            <div class="form-group" id="taskCommandGroup">
                                 <label>执行命令</label>
-                                <textarea id="taskCommand" class="form-control" rows="3" required></textarea>
+                                <textarea id="taskCommand" class="form-control" rows="3"></textarea>
+                            </div>
+                            <!-- 条件分支配置（仅条件任务显示） -->
+                            <div class="condition-config" id="conditionConfig" style="display: none;">
+                                <div class="form-group">
+                                    <label>条件表达式</label>
+                                    <input type="text" id="taskConditionExpr" class="form-control"
+                                           placeholder="例: env == 'prod' 或 ${env} == 'prod'">
+                                    <small class="form-hint">
+                                        支持 ==、!=、&gt;、&gt;=、&lt;、&lt;=、and、not；
+                                        可引用运行参数与 <code>任务ID_status</code>
+                                    </small>
+                                </div>
+                                <div class="form-group">
+                                    <label>条件为真（✓）时执行</label>
+                                    <select id="taskTrueBranch" class="form-control">
+                                        <option value="">— 不配置（结束） —</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>条件为假（✗）时执行</label>
+                                    <select id="taskFalseBranch" class="form-control">
+                                        <option value="">— 不配置（结束） —</option>
+                                    </select>
+                                </div>
+                                <small class="form-hint">
+                                    保存后会自动建立条件任务到分支任务的连线；
+                                    运行时未被选中的分支将标记为“已跳过”
+                                </small>
                             </div>
                             <div class="form-group">
                                 <label>超时时间（秒）</label>
@@ -221,6 +253,17 @@
                             <div class="info-row">
                                 <span class="label">结束时间:</span>
                                 <span id="runEndTime" class="value">-</span>
+                            </div>
+                            <div class="info-row run-counts">
+                                <span class="count-item count-success">
+                                    成功 <b id="runSuccessCount">0</b>
+                                </span>
+                                <span class="count-item count-failed">
+                                    失败 <b id="runFailedCount">0</b>
+                                </span>
+                                <span class="count-item count-skipped">
+                                    已跳过 <b id="runSkippedCount">0</b>
+                                </span>
                             </div>
                         </div>
                         <div class="task-status-list" id="taskStatusList"></div>

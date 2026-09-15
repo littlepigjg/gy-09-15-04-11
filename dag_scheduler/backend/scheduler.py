@@ -300,70 +300,97 @@ class TaskScheduler:
             # 获取执行计划
             execution_levels = dag_scheduler.get_execution_levels()
             run.execution_plan = [[t.id for t in level] for level in execution_levels]
-            
+
             completed_tasks: Set[str] = set()
             running_tasks: Set[str] = set()
             failed_tasks: Set[str] = set()
             skipped_tasks: Set[str] = set()
-            
+
             # 构建执行上下文
             context = {
                 'variables': run.parameters.copy(),
                 'task_instances': {}
             }
-            
-            # 按层级执行
+
+            # 按层级执行；条件网关在该层先判定分支，未选中的分支立即标记跳过
             for level_idx, level in enumerate(execution_levels):
-                # 获取当前可执行的任务
-                ready_tasks = dag_scheduler.get_ready_tasks(
-                    completed_tasks, running_tasks, failed_tasks, skipped_tasks, context
-                )
-                
-                # 过滤出当前层级的任务
-                level_tasks = [
-                    t for t in ready_tasks 
-                    if t.id in [lt.id for lt in level]
-                    and t.id not in running_tasks
-                    and t.id not in failed_tasks
-                ]
-                
-                if not level_tasks:
-                    continue
-                
-                # 按优先级排序
-                level_tasks.sort(key=lambda t: t.resources.priority, reverse=True)
-                
-                # 为每个任务创建执行协程
-                tasks_coroutines = []
-                for task in level_tasks:
-                    # 检查锁
-                    if task.lock:
-                        if self._lock_manager.is_locked(task.lock.lock_key):
-                            # 等待锁
-                            logger.info(f"任务 {task.id} 等待锁 {task.lock.lock_key}")
-                            # 可以选择等待或跳过
-                            continue
-                    
-                    running_tasks.add(task.id)
-                    run.task_instances[task.id].status = TaskStatus.RUNNING
-                    
-                    coro = self._execute_task(
-                        run_id, task, context,
-                        completed_tasks, running_tasks, failed_tasks, skipped_tasks
+                level_ids = {t.id for t in level}
+                command_coroutines = []
+
+                # 同一层可能需要多轮处理：网关判定后会强制跳过分支头，
+                # 级联跳过又可能让同层后续任务暴露出来
+                while True:
+                    actions = dag_scheduler.get_runnable_tasks(
+                        completed_tasks, running_tasks, failed_tasks,
+                        skipped_tasks, context['variables'], run.task_instances
                     )
-                    tasks_coroutines.append(coro)
-                
-                # 并行执行当前层级的任务
-                if tasks_coroutines:
-                    await asyncio.gather(*tasks_coroutines, return_exceptions=True)
-            
-            # 检查最终状态
+
+                    acted = False
+                    stop_level = False
+                    for task, reason in actions:
+                        if task.id not in level_ids:
+                            continue
+
+                        if reason.startswith("skip:"):
+                            # 级联跳过（分支未选中 / 上游失败 / 前置条件不满足）
+                            await self._mark_task_skipped(
+                                run_id, task, reason[len("skip:"):]
+                            )
+                            skipped_tasks.add(task.id)
+                            acted = True
+                            continue
+
+                        if task.id in running_tasks:
+                            continue
+
+                        if task.type == TaskType.CONDITION:
+                            # 条件网关：求值并只放行一个分支
+                            selected = await self._execute_condition_task(
+                                run_id, task, context,
+                                completed_tasks, failed_tasks, skipped_tasks
+                            )
+                            acted = True
+                            if selected is None:
+                                # 条件表达式非法：网关失败，本层剩余任务将被级联跳过
+                                stop_level = True
+                                break
+                        else:
+                            running_tasks.add(task.id)
+                            run.task_instances[task.id].status = TaskStatus.RUNNING
+                            command_coroutines.append(
+                                self._execute_task(
+                                    run_id, task, context,
+                                    completed_tasks, running_tasks,
+                                    failed_tasks, skipped_tasks
+                                )
+                            )
+                            acted = True
+
+                    # 本层已无可即时处理的任务（剩余的都在等命令任务完成）
+                    if not acted or stop_level:
+                        break
+
+                # 并行执行本层所有命令型任务
+                if command_coroutines:
+                    await asyncio.gather(*command_coroutines, return_exceptions=True)
+
+            # 兜底：所有层级处理完后仍未到终态的任务（如上游失败），标记跳过
+            for task in dag_scheduler.get_unresolved_tasks(
+                completed_tasks, running_tasks, failed_tasks, skipped_tasks
+            ):
+                reason = "上游任务失败" if any(
+                    dep in failed_tasks for dep in task.dependencies
+                ) else "未执行（上游未完成）"
+                await self._mark_task_skipped(run_id, task, reason)
+                skipped_tasks.add(task.id)
+
+            # 检查最终状态：有失败才算失败，被跳过的分支不影响工作流成功
             if failed_tasks:
                 run.status = WorkflowStatus.FAILED
-                run.error_message = f"任务失败: {', '.join(failed_tasks)}"
+                run.error_message = f"任务失败: {', '.join(sorted(failed_tasks))}"
             else:
                 run.status = WorkflowStatus.SUCCESS
-            
+
             run.end_time = datetime.now()
             run.completed_tasks = len(completed_tasks)
             run.failed_tasks = len(failed_tasks)
@@ -399,6 +426,161 @@ class TaskScheduler:
             self._dag_schedulers.pop(run_id, None)
             self._run_locks.pop(run_id, None)
     
+    async def _mark_task_skipped(
+        self,
+        run_id: str,
+        task: TaskDefinition,
+        reason: str
+    ) -> None:
+        """将任务标记为已跳过（条件分支未选中），不作为失败处理"""
+        run = self._active_runs.get(run_id)
+        if not run:
+            return
+
+        instance = run.task_instances.get(task.id)
+        if not instance:
+            return
+
+        if instance.status in (
+            TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.SKIPPED
+        ):
+            return
+
+        instance.status = TaskStatus.SKIPPED
+        instance.skip_reason = reason
+        instance.start_time = instance.start_time or datetime.now()
+        instance.end_time = datetime.now()
+        instance.logs.append({
+            'timestamp': datetime.now().isoformat(),
+            'level': 'info',
+            'message': f'任务已跳过: {reason}'
+        })
+
+        # 同步到条件评估上下文
+        self.storage.append_task_log(run_id, task.id, f'任务已跳过: {reason}')
+        self.storage.save_workflow_run(run)
+
+        logger.info(f"任务 {task.id} 已跳过: {reason}")
+
+        await self._notify_status_change(
+            "task_skipped", run_id, {
+                "task_id": task.id,
+                "reason": reason,
+                "instance": instance.to_dict()
+            }
+        )
+
+    async def _execute_condition_task(
+        self,
+        run_id: str,
+        task: TaskDefinition,
+        context: Dict[str, Any],
+        completed_tasks: Set[str],
+        failed_tasks: Set[str],
+        skipped_tasks: Set[str]
+    ) -> Optional[bool]:
+        """执行条件网关：评估表达式，只放行一个分支
+
+        Returns:
+            True  - 走真分支
+            False - 走假分支
+            None  - 条件表达式非法，网关按失败处理
+        """
+        run = self._active_runs.get(run_id)
+        if not run:
+            return None
+
+        dag_scheduler = self._dag_schedulers.get(run_id)
+        instance = run.task_instances.get(task.id)
+
+        instance.status = TaskStatus.RUNNING
+        instance.start_time = datetime.now()
+
+        await self._notify_status_change(
+            "task_start", run_id, {
+                "task_id": task.id,
+                "attempt": 1,
+                "instance": instance.to_dict()
+            }
+        )
+
+        result, error = dag_scheduler.evaluate_condition(
+            task, context['variables'], run.task_instances
+        )
+
+        true_target, false_target = dag_scheduler.get_branch_targets(task)
+
+        if error:
+            # 表达式本身非法才算失败；普通的 false 结果不是失败
+            instance.status = TaskStatus.FAILED
+            instance.error_message = f"条件表达式非法: {error}"
+            instance.end_time = datetime.now()
+            failed_tasks.add(task.id)
+            self.storage.save_workflow_run(run)
+
+            await self._notify_status_change(
+                "task_error", run_id, {
+                    "task_id": task.id,
+                    "error": instance.error_message,
+                    "instance": instance.to_dict()
+                }
+            )
+            return None
+
+        # 网关本身执行成功，记录判定结果供运行详情展示
+        chosen_target = true_target if result else false_target
+        skipped_target = false_target if result else true_target
+        branch_name = "真" if result else "假"
+
+        instance.status = TaskStatus.SUCCESS
+        instance.branch_result = "true" if result else "false"
+        instance.end_time = datetime.now()
+        instance.stdout = (
+            f"条件 `{task.condition.expression}` 评估为 {result}，"
+            f"走{branch_name}分支"
+            + (f" -> {chosen_target}" if chosen_target else "（该分支未配置任务）")
+        )
+        instance.logs.append({
+            'timestamp': datetime.now().isoformat(),
+            'level': 'info',
+            'message': instance.stdout
+        })
+        completed_tasks.add(task.id)
+
+        context['task_instances'][task.id] = instance.to_dict()
+
+        self.storage.append_task_log(run_id, task.id, instance.stdout)
+        self.storage.save_workflow_run(run)
+
+        await self._notify_status_change(
+            "task_complete", run_id, {
+                "task_id": task.id,
+                "instance": instance.to_dict(),
+                "branch_result": instance.branch_result,
+                "chosen_task": chosen_target,
+                "skipped_task": skipped_target
+            }
+        )
+
+        logger.info(
+            f"条件网关 {task.id} 判定为 {result}，"
+            f"选中分支: {chosen_target}，跳过分支: {skipped_target}"
+        )
+
+        # 未选中的分支头立即标记跳过；其下游由级联规则继续传播
+        if skipped_target:
+            skipped_task_def = dag_scheduler.task_map.get(skipped_target)
+            if skipped_task_def and skipped_target not in skipped_tasks:
+                skipped_branch_name = "假" if result else "真"
+                await self._mark_task_skipped(
+                    run_id,
+                    skipped_task_def,
+                    f"条件 {task.id} 判定为{result}，{skipped_branch_name}分支未被选中"
+                )
+                skipped_tasks.add(skipped_target)
+
+        return result
+
     def _create_execution_record(self, run: WorkflowRun, workflow: WorkflowDefinition) -> None:
         """创建执行记录"""
         record = ExecutionRecord(
@@ -442,7 +624,13 @@ class TaskScheduler:
         instance = run.task_instances.get(task.id)
         if not instance:
             return
-        
+
+        # 条件网关由专门的分支逻辑处理，绝不执行命令
+        if task.type == TaskType.CONDITION:
+            logger.warning(f"条件网关 {task.id} 不能作为命令任务执行")
+            running_tasks.discard(task.id)
+            return
+
         # 解析命令模板
         command = VariableResolver.resolve_command(task.command, context)
         

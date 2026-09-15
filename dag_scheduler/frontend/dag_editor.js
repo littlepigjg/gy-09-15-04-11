@@ -157,27 +157,32 @@ class DAGEditor {
         const taskTemplates = {
             'shell': { name: 'Shell命令', command: 'echo "Hello World"' },
             'python': { name: 'Python脚本', command: 'python -c "print(1)"' },
-            'http': { name: 'HTTP请求', command: 'curl http://example.com' }
+            'http': { name: 'HTTP请求', command: 'curl http://example.com' },
+            'condition': { name: '条件分支', command: '' }
         };
-        
+
         const template = taskTemplates[type] || taskTemplates['shell'];
-        
+
         const task = {
             id: this.generateId(),
             name: template.name,
+            type: taskTemplates[type] ? type : 'shell',
             command: template.command,
             dependencies: [],
+            condition: type === 'condition'
+                ? { expression: 'true', true_task: null, false_task: null }
+                : null,
             timeout: 300,
             max_retries: 3,
             retry_delay: 5,
             position: position || { x: 100, y: 100 }
         };
-        
+
         this.tasks.push(task);
         this.renderer.renderNode(task);
         this.updateWorkflowInfo();
         this.emitChange();
-        
+
         return task;
     }
     
@@ -241,7 +246,7 @@ class DAGEditor {
         }
         
         task.dependencies.push(fromId);
-        this.renderer.renderConnection(fromId, toId);
+        this.refreshConnections();
         this.emitChange();
     }
     
@@ -253,8 +258,8 @@ class DAGEditor {
         if (index > -1) {
             task.dependencies.splice(index, 1);
         }
-        
-        this.renderer.removeConnection(fromId, toId);
+
+        this.refreshConnections();
         this.emitChange();
     }
     
@@ -298,11 +303,24 @@ class DAGEditor {
     refreshConnections() {
         // 清除所有连接
         this.renderer.connectionsLayer.innerHTML = '';
-        
-        // 重新绘制
+
+        // 重新绘制；条件网关 -> 分支目标的连线带 真/假 标签
         this.tasks.forEach(task => {
+            const branchMap = {};
+            if (task.type === 'condition' && task.condition) {
+                if (task.condition.true_task) branchMap[task.condition.true_task] = 'true';
+                if (task.condition.false_task) branchMap[task.condition.false_task] = 'false';
+            }
+
             (task.dependencies || []).forEach(depId => {
-                this.renderer.renderConnection(depId, task.id);
+                // depId 是前驱；当前 task 是后继。若前驱是条件网关则可能有分支标签
+                const depTask = this.tasks.find(t => t.id === depId);
+                let label = null;
+                if (depTask && depTask.type === 'condition' && depTask.condition) {
+                    if (depTask.condition.true_task === task.id) label = 'true';
+                    else if (depTask.condition.false_task === task.id) label = 'false';
+                }
+                this.renderer.renderConnection(depId, task.id, false, label);
             });
         });
     }
@@ -333,23 +351,84 @@ class DAGEditor {
     openTaskProperties(taskId) {
         const task = this.tasks.find(t => t.id === taskId);
         if (!task) return;
-        
+
         this.selectTask(taskId);
-        
+
         // 填充表单
         document.getElementById('taskId').value = task.id;
         document.getElementById('taskName').value = task.name;
-        document.getElementById('taskCommand').value = task.command;
-        document.getElementById('taskTimeout').value = task.timeout;
-        document.getElementById('taskMaxRetries').value = task.max_retries;
-        document.getElementById('taskRetryDelay').value = task.retry_delay;
-        
+        document.getElementById('taskCommand').value = task.command || '';
+        document.getElementById('taskTimeout').value = task.timeout ?? 300;
+        document.getElementById('taskMaxRetries').value = task.max_retries ?? 3;
+        document.getElementById('taskRetryDelay').value = task.retry_delay ?? 5;
+
+        const isCondition = task.type === 'condition';
+        document.getElementById('taskCommandGroup').style.display = isCondition ? 'none' : 'block';
+        document.getElementById('conditionConfig').style.display = isCondition ? 'block' : 'none';
+        document.getElementById('taskCommand').required = !isCondition;
+
+        if (isCondition) {
+            this.renderBranchSelectors(task);
+        }
+
         // 渲染依赖列表
         this.renderDependenciesList(task);
-        
+
         // 显示面板
         document.getElementById('taskProperties').style.display = 'block';
         document.getElementById('workflowProperties').style.display = 'none';
+    }
+
+    renderBranchSelectors(task) {
+        const condition = task.condition || { expression: '', true_task: null, false_task: null };
+        document.getElementById('taskConditionExpr').value = condition.expression || '';
+
+        ['taskTrueBranch', 'taskFalseBranch'].forEach(selectId => {
+            const branchKey = selectId === 'taskTrueBranch' ? 'true_task' : 'false_task';
+            const select = document.getElementById(selectId);
+            const current = condition[branchKey] || '';
+
+            select.innerHTML = '<option value="">— 不配置（分支结束） —</option>';
+            this.tasks.forEach(t => {
+                if (t.id === task.id) return;
+                const option = document.createElement('option');
+                option.value = t.id;
+                option.textContent = `${t.name} (${t.id})`;
+                select.appendChild(option);
+            });
+            select.value = current;
+
+            // 选择分支目标后自动建立依赖连线（条件网关 -> 分支任务）
+            select.onchange = () => {
+                const targetId = select.value || null;
+                if (!task.condition) {
+                    task.condition = { expression: '', true_task: null, false_task: null };
+                }
+                const oldTarget = task.condition[branchKey];
+                task.condition[branchKey] = targetId;
+
+                // 移除旧目标上的网关依赖
+                if (oldTarget && oldTarget !== targetId) {
+                    const oldTask = this.tasks.find(t => t.id === oldTarget);
+                    if (oldTask) {
+                        const idx = oldTask.dependencies.indexOf(task.id);
+                        if (idx > -1) oldTask.dependencies.splice(idx, 1);
+                    }
+                }
+
+                // 新目标自动连接
+                if (targetId && !this.wouldCreateCycle(task.id, targetId)) {
+                    const targetTask = this.tasks.find(t => t.id === targetId);
+                    if (targetTask && !targetTask.dependencies.includes(task.id)) {
+                        targetTask.dependencies.push(task.id);
+                    }
+                }
+
+                this.refreshConnections();
+                this.renderDependenciesList(task);
+                this.emitChange();
+            };
+        });
     }
     
     renderDependenciesList(task) {

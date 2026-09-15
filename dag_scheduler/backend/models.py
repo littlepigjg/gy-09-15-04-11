@@ -387,6 +387,10 @@ class TaskInstance:
     error_message: Optional[str] = None
     exit_code: Optional[int] = None
     process_id: Optional[int] = None
+
+    # 跳过信息（条件分支未选中时使用）
+    skip_reason: Optional[str] = None
+    branch_result: Optional[str] = None    # 条件网关判定结果: true / false
     
     # 日志和输出
     logs: List[Dict[str, Any]] = field(default_factory=list)
@@ -419,6 +423,8 @@ class TaskInstance:
             "error_message": self.error_message,
             "exit_code": self.exit_code,
             "process_id": self.process_id,
+            "skip_reason": self.skip_reason,
+            "branch_result": self.branch_result,
             "logs": self.logs[-100:],  # 只保留最近100条
             "stdout": self.stdout[-10000:],  # 限制输出大小
             "stderr": self.stderr[-10000:],
@@ -442,6 +448,8 @@ class TaskInstance:
             error_message=data.get("error_message"),
             exit_code=data.get("exit_code"),
             process_id=data.get("process_id"),
+            skip_reason=data.get("skip_reason"),
+            branch_result=data.get("branch_result"),
             logs=data.get("logs", []),
             stdout=data.get("stdout", ""),
             stderr=data.get("stderr", ""),

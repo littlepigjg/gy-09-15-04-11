@@ -389,15 +389,24 @@ class DAGRenderer {
         title.textContent = task.name || task.id;
         g.appendChild(title);
         
-        // 命令预览
+        // 命令/条件预览
         const subtitle = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         subtitle.classList.add('node-subtitle');
         subtitle.setAttribute('x', this.nodeWidth / 2 + 10);
         subtitle.setAttribute('y', 42);
-        const cmdPreview = task.command && task.command.length > 15 
-            ? task.command.substring(0, 15) + '...' 
-            : (task.command || '');
-        subtitle.textContent = cmdPreview;
+        let previewText = '';
+        if (task.type === 'condition') {
+            previewText = task.condition?.expression
+                ? ('❓ ' + (task.condition.expression.length > 14
+                    ? task.condition.expression.substring(0, 14) + '...'
+                    : task.condition.expression))
+                : '❓ 未配置条件';
+        } else {
+            previewText = task.command && task.command.length > 15
+                ? task.command.substring(0, 15) + '...'
+                : (task.command || '');
+        }
+        subtitle.textContent = previewText;
         g.appendChild(subtitle);
         
         // 状态指示器
@@ -409,9 +418,10 @@ class DAGRenderer {
                 'success': '#4caf50',
                 'failed': '#f44336',
                 'timeout': '#ff5722',
-                'skipped': '#9e9e9e'
+                'skipped': '#8d6e63',
+                'cancelled': '#9e9e9e'
             };
-            
+
             const statusDot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
             statusDot.setAttribute('cx', this.nodeWidth - 15);
             statusDot.setAttribute('cy', 15);
@@ -419,6 +429,21 @@ class DAGRenderer {
             statusDot.setAttribute('fill', statusColors[instance.status] || '#9e9e9e');
             statusDot.classList.add('status-indicator');
             g.appendChild(statusDot);
+        }
+
+        // 已跳过标记（画布上清晰区别于失败）
+        if (instance && instance.status === 'skipped') {
+            g.classList.add('skipped');
+            const skipText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            skipText.classList.add('node-skip-label');
+            skipText.setAttribute('x', this.nodeWidth / 2);
+            skipText.setAttribute('y', this.nodeHeight - 6);
+            skipText.textContent = '⏭ 已跳过';
+            if (instance.skip_reason) {
+                skipText.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'title'))
+                    .textContent = instance.skip_reason;
+            }
+            g.appendChild(skipText);
         }
         
         // 禁用标记
@@ -434,19 +459,28 @@ class DAGRenderer {
         return g;
     }
     
-    updateNodeStatus(taskId, status) {
+    updateNodeStatus(taskId, status, instance = null) {
         const node = document.getElementById(`node-${taskId}`);
         if (!node) return;
-        
+
         const rect = node.querySelector('.node-body');
         if (rect) {
             rect.classList.remove(
-                'pending', 'waiting', 'running', 'success', 'failed', 
+                'pending', 'waiting', 'running', 'success', 'failed',
                 'timeout', 'retrying', 'skipped', 'cancelled'
             );
             rect.classList.add(status);
         }
-        
+
+        if (status === 'skipped') {
+            node.classList.add('skipped');
+            this._ensureSkipLabel(node, instance?.skip_reason);
+        } else {
+            node.classList.remove('skipped');
+            const oldLabel = node.querySelector('.node-skip-label');
+            if (oldLabel) oldLabel.remove();
+        }
+
         const statusDot = node.querySelector('.status-indicator');
         if (statusDot) {
             const statusColors = {
@@ -456,10 +490,11 @@ class DAGRenderer {
                 'success': '#4caf50',
                 'failed': '#f44336',
                 'timeout': '#ff5722',
-                'skipped': '#9e9e9e'
+                'skipped': '#8d6e63',
+                'cancelled': '#9e9e9e'
             };
             statusDot.setAttribute('fill', statusColors[status] || '#9e9e9e');
-            
+
             // 运行时添加脉冲动画
             if (status === 'running') {
                 statusDot.classList.add('pulsing');
@@ -467,6 +502,54 @@ class DAGRenderer {
                 statusDot.classList.remove('pulsing');
             }
         }
+    }
+
+    _ensureSkipLabel(node, reason) {
+        if (node.querySelector('.node-skip-label')) return;
+        const skipText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        skipText.classList.add('node-skip-label');
+        skipText.setAttribute('x', this.nodeWidth / 2);
+        skipText.setAttribute('y', this.nodeHeight - 6);
+        skipText.textContent = '⏭ 已跳过';
+        if (reason) {
+            const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+            title.textContent = reason;
+            skipText.appendChild(title);
+        }
+        node.appendChild(skipText);
+    }
+
+    /**
+     * 根据任务运行状态标记条件分支连线：
+     * 选中的分支高亮，未选中的分支灰显
+     */
+    updateBranchEdges(tasks, taskInstances) {
+        if (!tasks || !taskInstances) return;
+
+        tasks.forEach(task => {
+            if (task.type !== 'condition' || !task.condition) return;
+            const inst = taskInstances[task.id];
+            if (!inst) return;
+
+            const branchResult = inst.branch_result;
+            if (!branchResult) return;
+
+            const chosen = branchResult === 'true'
+                ? task.condition.true_task
+                : task.condition.false_task;
+            const unchosen = branchResult === 'true'
+                ? task.condition.false_task
+                : task.condition.true_task;
+
+            if (chosen) {
+                const chosenPath = document.getElementById(`conn-${task.id}-${chosen}`);
+                if (chosenPath) chosenPath.classList.add('branch-taken');
+            }
+            if (unchosen) {
+                const skippedPath = document.getElementById(`conn-${task.id}-${unchosen}`);
+                if (skippedPath) skippedPath.classList.add('branch-skipped');
+            }
+        });
     }
     
     selectNode(taskId) {
@@ -488,45 +571,75 @@ class DAGRenderer {
     
     // ==================== 连接线渲染 ====================
     
-    renderConnection(fromId, toId, isActive = false) {
+    renderConnection(fromId, toId, isActive = false, branchLabel = null) {
         const key = `${fromId}-${toId}`;
-        
+
         const existing = document.getElementById(`conn-${key}`);
         if (existing) {
             existing.remove();
         }
-        
+
         const fromNode = document.getElementById(`node-${fromId}`);
         const toNode = document.getElementById(`node-${toId}`);
-        
+
         if (!fromNode || !toNode) return;
-        
+
         const fromTransform = fromNode.getAttribute('transform');
         const toTransform = toNode.getAttribute('transform');
-        
+
         const fromX = parseFloat(fromTransform.match(/translate\(([^,]+)/)[1]) + this.nodeWidth;
         const fromY = parseFloat(fromTransform.match(/,\s*([^)]+)/)[1]) + this.nodeHeight / 2;
-        
+
         const toX = parseFloat(toTransform.match(/translate\(([^,]+)/)[1]);
         const toY = parseFloat(toTransform.match(/,\s*([^)]+)/)[1]) + this.nodeHeight / 2;
-        
+
         // 贝塞尔曲线
         const controlPointOffset = Math.max(50, Math.abs(toX - fromX) * 0.4);
         const path = `M ${fromX} ${fromY} C ${fromX + controlPointOffset} ${fromY}, ${toX - controlPointOffset} ${toY}, ${toX} ${toY}`;
-        
+
         const pathElement = document.createElementNS('http://www.w3.org/2000/svg', 'path');
         pathElement.id = `conn-${key}`;
         pathElement.classList.add('connection-line');
         pathElement.setAttribute('d', path);
-        
+        pathElement.dataset.from = fromId;
+        pathElement.dataset.to = toId;
+
         if (isActive) {
             pathElement.classList.add('active');
         }
-        
-        // 添加动画类
-        pathElement.dataset.from = fromId;
-        pathElement.dataset.to = toId;
-        
+
+        // 条件分支标签：真 / 假
+        if (branchLabel === 'true' || branchLabel === 'false') {
+            pathElement.classList.add(`branch-${branchLabel}`);
+            pathElement.dataset.branch = branchLabel;
+
+            const midX = (fromX + toX) / 2;
+            const midY = (fromY + toY) / 2;
+
+            const labelGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            labelGroup.classList.add('branch-label-group');
+            labelGroup.setAttribute('transform', `translate(${midX}, ${midY})`);
+
+            const labelText = branchLabel === 'true' ? '真' : '假';
+            const pillW = 26;
+            const pill = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            pill.classList.add('branch-label-pill', `branch-pill-${branchLabel}`);
+            pill.setAttribute('x', -pillW / 2);
+            pill.setAttribute('y', -10);
+            pill.setAttribute('width', pillW);
+            pill.setAttribute('height', 20);
+            pill.setAttribute('rx', 10);
+
+            const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            text.classList.add('branch-label-text', `branch-text-${branchLabel}`);
+            text.setAttribute('x', 0);
+            text.setAttribute('y', 4);
+            text.textContent = labelText;
+
+            labelGroup.appendChild(pill);
+            labelGroup.appendChild(text);
+        }
+
         // 悬停效果
         pathElement.addEventListener('mouseenter', () => {
             pathElement.classList.add('hover');
@@ -534,10 +647,14 @@ class DAGRenderer {
         pathElement.addEventListener('mouseleave', () => {
             pathElement.classList.remove('hover');
         });
-        
+
         this.connectionsLayer.appendChild(pathElement);
-        this.connections.set(key, { fromId, toId });
-        
+        if (branchLabel === 'true' || branchLabel === 'false') {
+            // 标签最后插入，保证浮在连线之上
+            this.connectionsLayer.appendChild(labelGroup);
+        }
+        this.connections.set(key, { fromId, toId, branch: branchLabel });
+
         return pathElement;
     }
     

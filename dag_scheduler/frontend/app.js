@@ -217,7 +217,27 @@ class App {
             
             this.ws.on('task_complete', (data) => {
                 this.log(data.task_id, '任务执行完成', 'success');
-                this.renderer.updateNodeStatus(data.task_id, 'success');
+                this.renderer.updateNodeStatus(data.task_id, 'success', data.instance);
+                // 条件网关判定完成后，高亮选中的分支、灰显未选中分支
+                if (data.branch_result) {
+                    this.log(
+                        data.task_id,
+                        `条件判定为 ${data.branch_result}`
+                            + (data.chosen_task ? `，执行分支 ${data.chosen_task}` : '')
+                            + (data.skipped_task ? `，跳过分支 ${data.skipped_task}` : ''),
+                        'info'
+                    );
+                    this.renderer.updateBranchEdges(
+                        this.editor.tasks,
+                        { [data.task_id]: data.instance }
+                    );
+                }
+            });
+
+            this.ws.on('task_skipped', (data) => {
+                this.log(data.task_id, `任务已跳过: ${data.reason || '条件分支未选中'}`, 'warning');
+                this.renderer.updateNodeStatus(data.task_id, 'skipped', data.instance);
+                this.updateSkippedCount(data);
             });
             
             this.ws.on('task_error', (data) => {
@@ -274,6 +294,28 @@ class App {
         }
     }
     
+    // ==================== 状态文案 ====================
+
+    static STATUS_LABELS = {
+        pending: '等待中',
+        waiting: '等待依赖',
+        ready: '就绪',
+        running: '运行中',
+        success: '成功',
+        failed: '失败',
+        retrying: '重试中',
+        timeout: '超时',
+        skipped: '已跳过',
+        cancelled: '已取消',
+        blocked: '已阻塞',
+        idle: '空闲',
+        paused: '已暂停'
+    };
+
+    statusLabel(status) {
+        return App.STATUS_LABELS[status] || status;
+    }
+
     // ==================== API调用 ====================
     
     async api(url, options = {}) {
@@ -469,7 +511,7 @@ class App {
         container.innerHTML = runs.slice(0, 20).map(run => `
             <div class="list-item" data-run-id="${run.run_id}">
                 <div class="list-item-title">
-                    <span class="status-badge ${run.status}">${run.status}</span>
+                    <span class="status-badge ${run.status}">${this.statusLabel(run.status)}</span>
                     ${run.run_id}
                 </div>
                 <div class="list-item-meta">
@@ -501,38 +543,84 @@ class App {
     showRunDetails(run) {
         document.getElementById('runDetails').style.display = 'block';
         document.getElementById('workflowProperties').style.display = 'none';
-        
+
         document.getElementById('runId').textContent = run.run_id;
-        document.getElementById('runStatus').textContent = run.status;
+        document.getElementById('runStatus').textContent = this.statusLabel(run.status);
         document.getElementById('runStatus').className = `value status-badge ${run.status}`;
-        document.getElementById('runStartTime').textContent = run.start_time 
+        document.getElementById('runStartTime').textContent = run.start_time
             ? new Date(run.start_time).toLocaleString() : '-';
-        document.getElementById('runEndTime').textContent = run.end_time 
+        document.getElementById('runEndTime').textContent = run.end_time
             ? new Date(run.end_time).toLocaleString() : '-';
-        
-        // 渲染任务状态
+
+        document.getElementById('runSuccessCount').textContent = run.completed_tasks ?? 0;
+        document.getElementById('runFailedCount').textContent = run.failed_tasks ?? 0;
+        document.getElementById('runSkippedCount').textContent = run.skipped_tasks ?? 0;
+
+        // 渲染任务状态（已跳过与失败明确区分，并展示跳过原因）
         const taskList = document.getElementById('taskStatusList');
         if (run.task_instances) {
-            taskList.innerHTML = Object.entries(run.task_instances).map(([taskId, instance]) => `
-                <div class="task-status-item">
-                    <span>${taskId}</span>
-                    <span class="status-badge ${instance.status}">${instance.status}</span>
-                </div>
-            `).join('');
+            const taskNameMap = new Map((this.editor.tasks || []).map(t => [t.id, t.name]));
+            taskList.innerHTML = Object.entries(run.task_instances)
+                .sort((a, b) => {
+                    const order = { running: 0, success: 1, skipped: 2, failed: 3 };
+                    return (order[a[1].status] ?? 9) - (order[b[1].status] ?? 9);
+                })
+                .map(([taskId, instance]) => {
+                    const name = taskNameMap.get(taskId);
+                    const label = name ? `${name} (${taskId})` : taskId;
+                    const skipInfo = instance.status === 'skipped' && instance.skip_reason
+                        ? `<span class="skip-reason" title="${instance.skip_reason}">${instance.skip_reason}</span>`
+                        : '';
+                    const branchInfo = instance.branch_result
+                        ? `<span class="branch-result">条件=${instance.branch_result === 'true' ? '真' : '假'}</span>`
+                        : '';
+                    return `
+                <div class="task-status-item ${instance.status}">
+                    <span class="task-status-name">${label}</span>
+                    <span class="task-status-meta">${branchInfo}${skipInfo}</span>
+                    <span class="status-badge ${instance.status}">${this.statusLabel(instance.status)}</span>
+                </div>`;
+                }).join('');
+        }
+
+        // 画布节点与分支连线同步为运行状态
+        if (run.task_instances) {
+            Object.entries(run.task_instances).forEach(([taskId, instance]) => {
+                this.renderer.updateNodeStatus(taskId, instance.status, instance);
+            });
+            this.renderer.updateBranchEdges(this.editor.tasks, run.task_instances);
         }
     }
-    
+
+    updateSkippedCount(data) {
+        // 实时累加运行详情中的跳过数
+        const countEl = document.getElementById('runSkippedCount');
+        if (countEl && document.getElementById('runDetails').style.display !== 'none') {
+            countEl.textContent = (parseInt(countEl.textContent) || 0) + 1;
+        }
+    }
+
     updateRunStatus(data) {
         if (document.getElementById('runDetails').style.display !== 'none') {
-            document.getElementById('runStatus').textContent = data.status;
+            document.getElementById('runStatus').textContent = this.statusLabel(data.status);
             document.getElementById('runStatus').className = `value status-badge ${data.status}`;
+            if (typeof data.completed_tasks === 'number') {
+                document.getElementById('runSuccessCount').textContent = data.completed_tasks;
+            }
+            if (typeof data.failed_tasks === 'number') {
+                document.getElementById('runFailedCount').textContent = data.failed_tasks;
+            }
+            if (typeof data.skipped_tasks === 'number') {
+                document.getElementById('runSkippedCount').textContent = data.skipped_tasks;
+            }
         }
-        
+
         // 更新节点状态
         if (data.task_instances) {
             Object.entries(data.task_instances).forEach(([taskId, instance]) => {
-                this.renderer.updateNodeStatus(taskId, instance.status);
+                this.renderer.updateNodeStatus(taskId, instance.status, instance);
             });
+            this.renderer.updateBranchEdges(this.editor.tasks, data.task_instances);
         }
     }
     
@@ -554,15 +642,30 @@ class App {
     
     saveTaskProperties() {
         if (!this.editor.selectedTaskId) return;
-        
+
+        const task = this.editor.tasks.find(t => t.id === this.editor.selectedTaskId);
         const updates = {
             name: document.getElementById('taskName').value,
-            command: document.getElementById('taskCommand').value,
-            timeout: parseInt(document.getElementById('taskTimeout').value) || 300,
-            max_retries: parseInt(document.getElementById('taskMaxRetries').value) || 3,
-            retry_delay: parseInt(document.getElementById('taskRetryDelay').value) || 5
+            resources: {
+                ...(task?.resources || {}),
+                timeout: parseInt(document.getElementById('taskTimeout').value) || 300,
+                max_retries: parseInt(document.getElementById('taskMaxRetries').value),
+                retry_delay: parseInt(document.getElementById('taskRetryDelay').value)
+            }
         };
-        
+
+        if (task && task.type === 'condition') {
+            // 条件任务没有命令
+            updates.command = '';
+            updates.condition = {
+                expression: document.getElementById('taskConditionExpr').value.trim(),
+                true_task: document.getElementById('taskTrueBranch').value || null,
+                false_task: document.getElementById('taskFalseBranch').value || null
+            };
+        } else {
+            updates.command = document.getElementById('taskCommand').value;
+        }
+
         this.editor.updateTask(this.editor.selectedTaskId, updates);
         this.log('系统', '任务属性已更新', 'success');
     }
